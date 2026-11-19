@@ -220,23 +220,37 @@ export default function App() {
   const [newTotal, setNewTotal] = useState('');
   const [newDiscount, setNewDiscount] = useState('');
 
+  // Unique per-bill / per-page payload so each bill's QR holds its own exact bill details
   const getQrPayloadFromValues = (
     invoiceNo: string,
     agency: 'Anuradhapura' | 'Mihintale',
     dateStr: string,
     amount: string | number,
-    status: string
+    status: string,
+    pageNum?: number,
+    shopName?: string
   ) => {
     const agencyCode = agency === 'Anuradhapura' ? 'CG0388' : 'CG0392';
-    return `${invoiceNo}|${agencyCode}|${dateStr}|${amount}|${status}`;
+    const cleanInv = (invoiceNo || '').trim() || `BILL-P${pageNum || 1}`;
+    const cleanShop = (shopName || '').trim().slice(0, 28);
+    const pagePart = pageNum ? `P${pageNum}` : 'P1';
+    return `${cleanInv}|${pagePart}|${agencyCode}|${dateStr}|${amount || 0}|${status}|${cleanShop}`;
   };
 
   const getQrImageUrlFromPayload = (payload: string, size = 200) => {
-    return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&ecc=M&margin=6&data=${encodeURIComponent(payload)}`;
+    return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&ecc=L&margin=6&data=${encodeURIComponent(payload)}`;
   };
 
   const getQrPayload = (ord: WholesaleOrder) => {
-    return getQrPayloadFromValues(ord.id, ord.agency, ord.date, ord.netAmount, ord.paymentStatus);
+    return getQrPayloadFromValues(
+      ord.id,
+      ord.agency,
+      ord.date,
+      ord.netAmount,
+      ord.paymentStatus,
+      1,
+      ord.shopName
+    );
   };
 
   const getQrImageUrl = (ord: WholesaleOrder) => {
@@ -248,27 +262,43 @@ export default function App() {
     fallbackInvoice: string,
     pageNum: number
   ): { invoiceNo: string; shopName: string; amount: string } => {
-    const normalized = pageText.replace(/\s+/g, ' ').trim();
+    const compact = pageText.replace(/\s+/g, ' ').trim();
 
-    const invMatch = normalized.match(
-      /(?:Invoice\s*No\s*:?\s*)?(\d{2}[A-Z]{3}_[A-Z0-9_]+|CG\d{4}[A-Z0-9]+|[A-Z]{2,5}\d{3,}[A-Z0-9_-]*)/i
-    );
-    const extractedInvoice = invMatch
-      ? invMatch[1].toUpperCase()
-      : `${fallbackInvoice}-P${pageNum}`;
+    // Match common SFA / Freelan invoice formats first
+    const invPatterns = [
+      /\b(\d{2}[A-Z]{3}_[A-Z0-9_]+)\b/i,
+      /\b(CG\d{4}[A-Z0-9]+)\b/i,
+      /\b([A-Z]{2,6}\d{2,}[A-Z0-9_/-]*)\b/i
+    ];
 
-    const shopMatch = normalized.match(
-      /(?:Invoiced\s*To\s*:?\s*)([A-Za-z0-9\s.&'-]{3,45}?)(?=\s+(?:Tel|Ordered|Invoice|Item|Gross|Total|\d{10}|No\.))/i
+    let foundInvoice = '';
+    for (const pat of invPatterns) {
+      const m = compact.match(pat);
+      if (m && m[1]) {
+        const candidate = m[1].toUpperCase();
+        if (!['INVOICE', 'DUPLICATE', 'ORIGINAL', 'MIHINTHALE', 'ANURADHAPURA', 'FREELAN'].includes(candidate)) {
+          foundInvoice = candidate;
+          break;
+        }
+      }
+    }
+
+    const finalInvoice = foundInvoice || `${fallbackInvoice}-P${pageNum}`;
+
+    // Extract shop name after "Invoiced To" if present
+    const shopMatch = compact.match(
+      /Invoiced\s*To\s*:?\s*([A-Za-z0-9\s.&'-]{3,40}?)(?=\s+(?:Tel|Ordered|Invoice|Item|Gross|Total|No\.|\d{7,}))/i
     );
     const extractedShop = shopMatch ? shopMatch[1].trim() : '';
 
-    const totalMatch = normalized.match(
-      /(?:Total\s*Value|Net\s*Total|Grand\s*Total)\s*:?\s*(?:Rs\.?|LKR)?\s*([\d,]+\.\d{2}|[\d,]+)/i
+    // Extract Total Value / Net Total
+    const totalMatch = compact.match(
+      /(?:Total\s*Value|Net\s*Total|Grand\s*Total|Gross\s*Total)\s*:?\s*(?:Rs\.?|LKR)?\s*([\d,]+\.\d{2}|[\d,]+)/i
     );
     const extractedAmount = totalMatch ? totalMatch[1].replace(/,/g, '') : '';
 
     return {
-      invoiceNo: extractedInvoice,
+      invoiceNo: finalInvoice,
       shopName: extractedShop,
       amount: extractedAmount
     };
@@ -293,14 +323,14 @@ export default function App() {
       bytes[i] = binaryStr.charCodeAt(i);
     }
 
-    const loadingTask = pdfjsLib.getDocument({ data: bytes, disableWorker: false });
+    const loadingTask = pdfjsLib.getDocument({ data: bytes });
     const pdfDoc = await loadingTask.promise;
     const numPages = pdfDoc.numPages || 1;
     const renderedPages: PdfPageBill[] = [];
 
     for (let pageNum = 1; pageNum <= numPages; pageNum++) {
       const page = await pdfDoc.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 1.75 });
+      const viewport = page.getViewport({ scale: 1.7 });
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
       canvas.width = viewport.width;
@@ -395,7 +425,7 @@ export default function App() {
                   ? {
                       ...item,
                       isRendering: false,
-                      renderError: 'PDF පිටු ස්වයංක්‍රීයව render කිරීමට නොහැකි විය. Preview & Print ඔබා PDF එක විවෘත කරන්න.'
+                      renderError: 'PDF පිටු render කිරීමේදී දෝෂයක් ඇති විය. නැවත උත්සාහ කරන්න.'
                     }
                   : item
               )
@@ -531,8 +561,13 @@ export default function App() {
     if (!trimmed) return;
     setScannedResultText(trimmed);
 
+    // Format: InvoiceNo|Page|Agency|Date|Amount|Status|Shop
     const parts = trimmed.split('|');
     const invoiceCandidate = parts[0]?.trim() || trimmed;
+    const pageTag = parts[1]?.trim() || '';
+    const amountFromQr = parseFloat(parts[4] || parts[3] || '0') || 0;
+    const dateFromQr = parts[3]?.match(/^\d{4}-\d{2}-\d{2}$/) ? parts[3] : todayStr;
+    const shopFromQr = parts[6]?.trim() || '';
 
     const existing = orders.find(
       o => o.id.toLowerCase() === invoiceCandidate.toLowerCase()
@@ -541,16 +576,15 @@ export default function App() {
     if (existing) {
       setMatchedScannedOrder(existing);
     } else {
-      const parsedAmount = parseFloat(parts[3] || '0') || 0;
       const created: WholesaleOrder = {
         id: invoiceCandidate,
-        agency: parts[1] === 'CG0388' ? 'Anuradhapura' : 'Mihintale',
-        shopName: `Scanned Bill (${invoiceCandidate})`,
+        agency: parts[2] === 'CG0388' ? 'Anuradhapura' : 'Mihintale',
+        shopName: shopFromQr || `Scanned Bill (${invoiceCandidate}${pageTag ? ` - ${pageTag}` : ''})`,
         category: 'Wholesale',
-        totalAmount: parsedAmount,
+        totalAmount: amountFromQr,
         discountPercentage: 0,
-        netAmount: parsedAmount,
-        date: parts[2] || todayStr,
+        netAmount: amountFromQr,
+        date: dateFromQr,
         status: 'Dispatched',
         paymentStatus: 'Unpaid',
         paidAmount: 0
@@ -695,6 +729,8 @@ export default function App() {
             margin: 0 !important;
             padding: 0 !important;
             width: 100% !important;
+            height: auto !important;
+            overflow: visible !important;
           }
           .no-print {
             display: none !important;
@@ -717,9 +753,17 @@ export default function App() {
             box-shadow: none !important;
             background: #ffffff !important;
           }
+          .print-page-wrapper {
+            margin: 0 !important;
+            padding: 0 !important;
+          }
           .print-each-page {
             position: relative !important;
             width: 100% !important;
+            max-height: 98.5vh !important;
+            overflow: hidden !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
             page-break-after: always !important;
             break-after: page !important;
             border: none !important;
@@ -733,17 +777,19 @@ export default function App() {
           }
           .print-page-img {
             width: 100% !important;
+            max-height: 98vh !important;
             height: auto !important;
+            object-fit: contain !important;
             display: block !important;
           }
           .print-top-right-qr {
             position: absolute !important;
-            top: 8px !important;
-            right: 8px !important;
+            top: 6px !important;
+            right: 6px !important;
             z-index: 50 !important;
             background: #ffffff !important;
             border: 1.5px solid #000000 !important;
-            padding: 3px !important;
+            padding: 2px !important;
           }
         }
       `}</style>
@@ -824,7 +870,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Multi-Page PDF Print Modal: Every Page Has Its Own Bill's Top-Right QR */}
+      {/* Multi-Page PDF Print Modal */}
       {billToPrintModal && (
         <div className="print-modal-backdrop fixed inset-0 z-50 bg-black/85 overflow-y-auto p-4">
           <div className="print-full-page-wrapper max-w-4xl mx-auto bg-white text-slate-900 rounded-2xl p-4 md:p-6 shadow-2xl space-y-6">
@@ -878,10 +924,12 @@ export default function App() {
                   activeAgency,
                   activeDateForQr,
                   pg.amount || '0',
-                  pg.paymentStatus
+                  pg.paymentStatus,
+                  pg.pageNumber,
+                  pg.shopName
                 );
                 return (
-                  <div key={pg.pageNumber} className="space-y-2">
+                  <div key={pg.pageNumber} className="print-page-wrapper space-y-2">
                     <div className="no-print flex flex-wrap items-center gap-2 bg-slate-100 p-2.5 rounded-lg border border-slate-300 text-xs">
                       <span className="font-bold text-slate-800">Page {pg.pageNumber}:</span>
                       <input
@@ -937,40 +985,44 @@ export default function App() {
                 );
               })
             ) : (
-              <div className="print-each-page relative border border-slate-300 rounded-lg overflow-hidden bg-white">
-                <div className="print-top-right-qr absolute top-2 right-2 z-20 bg-white border border-slate-900 rounded-md p-1 shadow flex flex-col items-center">
-                  <img
-                    src={getQrImageUrlFromPayload(
-                      getQrPayloadFromValues(
-                        billToPrintModal.invoiceNo,
-                        activeAgency,
-                        activeDateForQr,
-                        billToPrintModal.amount || '0',
-                        billToPrintModal.paymentStatus
-                      ),
-                      200
-                    )}
-                    alt={`QR ${billToPrintModal.invoiceNo}`}
-                    className="w-24 h-24 object-contain"
-                  />
-                  <span className="text-[9px] font-mono font-bold text-slate-900 mt-0.5">
-                    {billToPrintModal.invoiceNo}
-                  </span>
-                </div>
+              <div className="print-page-wrapper">
+                <div className="print-each-page relative border border-slate-300 rounded-lg overflow-hidden bg-white">
+                  <div className="print-top-right-qr absolute top-2 right-2 z-20 bg-white border border-slate-900 rounded-md p-1 shadow flex flex-col items-center">
+                    <img
+                      src={getQrImageUrlFromPayload(
+                        getQrPayloadFromValues(
+                          billToPrintModal.invoiceNo,
+                          activeAgency,
+                          activeDateForQr,
+                          billToPrintModal.amount || '0',
+                          billToPrintModal.paymentStatus,
+                          1,
+                          billToPrintModal.shopName
+                        ),
+                        200
+                      )}
+                      alt={`QR ${billToPrintModal.invoiceNo}`}
+                      className="w-24 h-24 object-contain"
+                    />
+                    <span className="text-[9px] font-mono font-bold text-slate-900 mt-0.5">
+                      {billToPrintModal.invoiceNo}
+                    </span>
+                  </div>
 
-                {billToPrintModal.fileType === 'pdf' ? (
-                  <iframe
-                    src={billToPrintModal.dataUrl}
-                    title={billToPrintModal.fileName}
-                    className="print-page-img w-full h-[80vh] border-0"
-                  />
-                ) : (
-                  <img
-                    src={billToPrintModal.dataUrl}
-                    alt={billToPrintModal.fileName}
-                    className="print-page-img w-full h-auto block"
-                  />
-                )}
+                  {billToPrintModal.fileType === 'pdf' ? (
+                    <iframe
+                      src={billToPrintModal.dataUrl}
+                      title={billToPrintModal.fileName}
+                      className="print-page-img w-full h-[80vh] border-0"
+                    />
+                  ) : (
+                    <img
+                      src={billToPrintModal.dataUrl}
+                      alt={billToPrintModal.fileName}
+                      className="print-page-img w-full h-auto block"
+                    />
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1169,7 +1221,9 @@ export default function App() {
                         activeAgency,
                         activeDateForQr,
                         previewAmount || '0',
-                        previewStatus
+                        previewStatus,
+                        samplePage?.pageNumber || 1,
+                        samplePage?.shopName || item.shopName
                       );
 
                       return (
@@ -1513,22 +1567,4 @@ export default function App() {
                 Active Agency: <span className="font-bold text-amber-400">{activeAgency}</span>
               </p>
               <p className="text-xs text-slate-400 mb-4 font-mono">
-                User: {activeAgency === 'Anuradhapura' ? 'CG0388' : 'CG0392'}
-              </p>
-              <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 mb-4">
-                <p className="text-xs text-slate-400">Business Owner</p>
-                <p className="text-sm font-bold text-white mt-0.5">Egodagedara Arjunal Nishantha Kumara</p>
-                <p className="text-xs text-amber-400 mt-2">SMS Alert Mobile: +94 78 198 0085</p>
-              </div>
-            </div>
-
-            <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-700 text-center">
-              <p className="text-xs text-slate-400">Per-Page QR + Multi-Page Print</p>
-              <p className="text-xs text-emerald-400 font-semibold mt-1">● Active & Ready</p>
-            </div>
-          </div>
-        </main>
-      </div>
-    </div>
-  );
-}
+                User: {activeAgency === 'Anuradhapura' ? 'CG0388' : 'CG0392
